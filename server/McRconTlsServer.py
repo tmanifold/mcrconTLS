@@ -23,14 +23,14 @@ class mcrconTLS:
 
         print('Booting up minecraft server...')
 
-        server = await asyncio.create_subprocess_shell(command,
+        self.server = await asyncio.create_subprocess_shell(command,
             stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE)
 
         await asyncio.gather(
-            self.read(server.stdout),
-            self.write(server.stdin)
+            self.read(self.server.stdout),
+            self.write(self.server.stdin)
         )
     
     async def start_rcon_server(self):
@@ -43,15 +43,26 @@ class mcrconTLS:
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         context.load_cert_chain(certfile='./ssl/serverCert.crt', keyfile='./ssl/serverKey.key') # REPLACE WITH VALID CERT SIGNED BY CA
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0) as sock:
-            IP = socket.gethostbyname(socket.gethostname())
-            sock.bind((IP, self.RCON_PORT))
-            print(f'Listening for RCON connections on {IP}:{self.RCON_PORT}')
-            sock.listen()
+        while True:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0) as sock:
+                IP = socket.gethostbyname(socket.gethostname())
+                sock.bind((IP, self.RCON_PORT))
+                print(f'Listening for RCON connections on {IP}:{self.RCON_PORT}')
+                sock.listen()
 
-            with context.wrap_socket(sock, server_side=True) as ssock:
-                conn, addr = ssock.accept()
-                print (f'TLS connection from {addr}')
+                with context.wrap_socket(sock, server_side=True) as ssock:
+                    conn, addr = ssock.accept()
+                    print (f'TLS connection from {addr}')
+
+                    try:
+                        while (data := conn.recv(1024)):
+                            self.server.stdin.write(data)
+                    except ConnectionResetError:
+                        print(f'[{addr}] connection closed by client.')
+
+            
+                    print(data.decode())
+                print(f'RCON Connection to {IP} closed.')
 
     async def read(self, stream):
         # will need to modify this to send to client
