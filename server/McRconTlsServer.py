@@ -1,46 +1,65 @@
 # mcrconTLS.py
 
-import asyncio
 import subprocess
 import threading
 import socket
 import ssl
+import queue
+import re
+import sys
 
-class mcrconTLS:
+from mcrconTLS import McRconTLS, Packet
+
+class MCRCONTLSServer:
     '''A wrapper for minecraft server that supports RCON over TLS.'''
+
+    connections = []
+    command_queue = queue.Queue()
+    command_queue_condition = threading.Condition()
 
     RCON_PORT = 25576 # default port number is 25575. Using 25576 for encrypted comms
 
-    def __init__(self):
+    CERT = './ssl/serverCert.crt'
+    KEY  = './ssl/serverKey.key'
+
+    def __init__(self, cert=None, key=None):
         print("Initialized mcrconTLS")
 
+        if cert:
+            self.CERT = cert
         
-        asyncio.run(self.start_rcon_server())
-
-        asyncio.run(self.start_minecraft('java -jar ./minecraft_server.jar nogui'))
+        if key:
+            self.KEY = key
     
-    async def start_minecraft(self, command):
+    # def send_response(self):
+    #     '''Send server response and send it to the client'''
 
-        print('Booting up minecraft server...')
+    def read_stdout(self):
+        while True:
+            out = self.minecraft.stdout.readline()
+            if out:
+                print(f'[stdout]' + out, end='')
 
-        self.server = await asyncio.create_subprocess_shell(command,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE)
+    def rcon_queueWriter(self):
+        while self.minecraft.poll() == None:
 
-        await asyncio.gather(
-            self.read(self.server.stdout),
-            self.write(self.server.stdin)
-        )
-    
-    async def start_rcon_server(self):
-        t_rcon = threading.Thread(target=self.rcon_server, name="RCONServer")
-        t_rcon.start()
+            with self.command_queue_condition:
 
+                while self.command_queue.empty():
+                    self.command_queue_condition.wait()
+
+                cmd = self.command_queue.get()
+                #print(f'[{__name__}] writing {cmd} to mcstdin -> {cmd.encode()}')
+                
+                print(cmd, file=self.minecraft.stdin)
+                #self.minecraft.stdin.write(cmd.encode())
+                self.minecraft.stdin.flush()
+                
     def rcon_server(self):
         print('Opening TLS encrypted channel')
         # https://docs.python.org/3/library/ssl.html
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        context.verify_mode = ssl.CERT_NONE
         context.load_cert_chain(certfile='./ssl/serverCert.crt', keyfile='./ssl/serverKey.key') # REPLACE WITH VALID CERT SIGNED BY CA
 
         while True:
@@ -54,32 +73,67 @@ class mcrconTLS:
                     conn, addr = ssock.accept()
                     print (f'TLS connection from {addr}')
 
+                    rcon = McRconTLS(addr[0], addr[1])
+
                     try:
-                        while (data := conn.recv(1024)):
-                            self.server.stdin.write(data)
+                            while self.minecraft.poll() == None:
+                                p, size = rcon.packet_recv(conn)
+                                #print(f'{p.id}, {p.ptype}, {p.payload.decode()}')
+                                if size > 14:
+                                    with self.command_queue_condition:
+                                        self.command_queue.put(p.payload.decode())
+                                        #print(f'[{__name__}] put {p.payload} in queue')
+
+                                        self.command_queue_condition.notifyAll()
+                                
+                        
                     except ConnectionResetError:
                         print(f'[{addr}] connection closed by client.')
 
-            
-                    print(data.decode())
-                print(f'RCON Connection to {IP} closed.')
+            print(f'RCON Connection to {IP} closed.')
 
-    async def read(self, stream):
-        # will need to modify this to send to client
-        while True:
-            buffer = await stream.readline()
-            if not buffer:
-                break
-            
-            print(f'[stdout] ' + buffer.decode(), end='')
-    
-    async def write(self, stream):
-        # do stuff when a request is received here
-        print('in write')
+    def start(self):
+        self.start_minecraft('java -jar ./minecraft_server.jar nogui')
+
+  
+    def start_minecraft(self, command):
+
+        print(command)
+
+        self.minecraft = subprocess.Popen(command,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT,
+                                    stdin=subprocess.PIPE,
+                                    text=True)
+
+        self.start_rcon_server()
+
+        threading.Thread(target=self.read_stdout, daemon=True).start()
+
+        #rcon_started = False
+
+        # while self.minecraft.poll() == None:
+        #     out = self.minecraft.stdout.readline().decode()
+
+        #     # if not rcon_started:
+        #     #     match = re.match('Done \([0-9]+\.[0-9]+s\)', out)
+        #     #     print(f'match={match}')
+        #     #     if match:
+        #     #         rcon_started = True
+        #     #         threading.Thread(target=self.start_rcon_server)
+
+        #     if out:
+        #         print(f'[stdout] ' + out, end='')
+
+    def start_rcon_server(self):
+            threading.Thread(target=self.rcon_server, name="RCONServer").start()
+            threading.Thread(target=self.rcon_queueWriter, name='rcon_queueWriter', daemon=True).start()
+
 
 if __name__ == "__main__":
     #print(mcrconTLS.__doc__)
 
-    mcrconTLS()
+    server = MCRCONTLSServer()
+    server.start()
 
     
