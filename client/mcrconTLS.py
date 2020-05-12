@@ -16,7 +16,7 @@ from collections import namedtuple
 
 
 class IncompletePacketException(Exception):
-    '''RCON packet is not formatted correctly'''
+    '''RCON packet is not fully formed'''
     def __init__(self, m):
         self.minimum = m
     pass
@@ -53,41 +53,6 @@ class McRconTLS:
         self.port = port
         self.password = password
 
-    def connect(self, purpose, verify_mode):
-        '''Attempt to establish a secured connection to the server'''
-
-        context = ssl.create_default_context(purpose, cafile='ssl/serverCert.crt')
-        context.load_verify_locations('./ssl/serverCert.crt')
-        context.check_hostname = False
-        
-        if verify_mode == 0:
-            context.verify_mode = ssl.CERT_NONE
-        elif verify_mode == 1:
-            context.verify_mode = ssl.CERT_OPTIONAL
-        elif verify_mode  == 2:
-            context.verify_mode = ssl.CERT_REQUIRED
-
-        with socket.create_connection((self.host, self.port)) as sock:
-            with context.wrap_socket(sock) as ssock:
-                print(f'TLS connection established. {self.host}:{self.port}')
-
-                # Enter login credentials
-                # if self.login():
-
-                try :
-                    while (command := self.console()) != 'exit':
-                        # send the command packet
-                        self.packet_send(
-                            ssock,
-                            Packet(REQUEST_ID.MESSAGE, Packet.TYPE.COMMAND, command.encode())
-                        )
-                        # send message-terminating packet
-                        self.packet_send(
-                            ssock,
-                            Packet(REQUEST_ID.END_MESSAGE,Packet.TYPE.COMMAND)
-                        )
-                except ConnectionResetError:
-                    print('Server closed the connection')
     
     def console(self):
         '''Simple prompt for user input'''
@@ -139,7 +104,6 @@ class McRconTLS:
         # print(f'data={data}')
 
         # return self.decode(data)
-
 
     def packet_send(self, sock, packet):
         '''Send the packet over the given socket.'''

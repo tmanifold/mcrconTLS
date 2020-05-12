@@ -8,7 +8,7 @@ import queue
 import re
 import sys
 
-from mcrconTLS import McRconTLS, Packet
+from mcrconTLS import *
 
 class MCRCONTLSServer:
     '''A wrapper for minecraft server that supports RCON over TLS.'''
@@ -37,6 +37,7 @@ class MCRCONTLSServer:
     def read_stdout(self):
         while True:
             out = self.minecraft.stdout.readline()
+
             if out:
                 print(f'[stdout]' + out, end='')
 
@@ -62,42 +63,76 @@ class MCRCONTLSServer:
         context.verify_mode = ssl.CERT_NONE
         context.load_cert_chain(certfile='./ssl/serverCert.crt', keyfile='./ssl/serverKey.key') # REPLACE WITH VALID CERT SIGNED BY CA
 
-        while True:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0) as sock:
-                IP = socket.gethostbyname(socket.gethostname())
-                sock.bind((IP, self.RCON_PORT))
-                print(f'Listening for RCON connections on {IP}:{self.RCON_PORT}')
-                sock.listen()
+        IP = socket.gethostbyname(socket.gethostname())
 
-                with context.wrap_socket(sock, server_side=True) as ssock:
-                    conn, addr = ssock.accept()
-                    print (f'TLS connection from {addr}')
+        ssock = context.wrap_socket(
+            socket.create_server((IP, self.RCON_PORT)),
+            server_side=True
+        )
 
-                    rcon = McRconTLS(addr[0], addr[1])
+        if (ssock):
+            # IP = socket.gethostbyname(socket.gethostname())
+            # sock.bind((IP, self.RCON_PORT))
+            print(f'Listening for RCON connections on {IP}:{self.RCON_PORT}')
+            # sock.listen()
+            while True:
+        #     with socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0) as sock:
+        #         IP = socket.gethostbyname(socket.gethostname())
+        #         sock.bind((IP, self.RCON_PORT))
+        #         print(f'Listening for RCON connections on {IP}:{self.RCON_PORT}')
+        #         sock.listen()
 
-                    try:
-                            while self.minecraft.poll() == None:
-                                p, size = rcon.packet_recv(conn)
-                                #print(f'{p.id}, {p.ptype}, {p.payload.decode()}')
-                                if size > 14:
-                                    with self.command_queue_condition:
-                                        self.command_queue.put(p.payload.decode())
-                                        #print(f'[{__name__}] put {p.payload} in queue')
+        #         with context.wrap_socket(sock, server_side=True) as ssock:
+                conn, addr = ssock.accept()
+                print (f'TLS connection from {addr}')
 
-                                        self.command_queue_condition.notifyAll()
-                                
-                        
-                    except ConnectionResetError:
-                        print(f'[{addr}] connection closed by client.')
+                rcon = McRconTLS(addr[0], addr[1])
 
-            print(f'RCON Connection to {IP} closed.')
+                self.connections.append((rcon, conn))
+
+                # start a thread with a new rcon session.
+                threading.Thread(target=self.rcon_session, args=(rcon, conn), daemon=True).start()
+    
+    # begin a session with the given rcon object on the specified connection
+    def rcon_session(self, rcon, conn):
+        '''Start threads for sending to and receiving from client'''
+        threading.Thread(target=self.rcon_session_recv, args=(rcon, conn)).start()
+        threading.Thread(target=self.rcon_session_send, args=(rcon, conn), daemon=True).start()
+
+    def rcon_session_recv(self, rcon, conn):
+        '''Routine to recieve incoming messages from a client'''
+        try:
+            while conn and self.minecraft.poll() == None:
+                p, size = rcon.packet_recv(conn)
+                #print(f'{p.id}, {p.ptype}, {p.payload.decode()}')
+                if size > 14:
+                    with self.command_queue_condition:
+                        self.command_queue.put(p.payload.decode())
+                        #print(f'[{__name__}] put {p.payload} in queue')
+
+                        self.command_queue_condition.notifyAll()
+            print(f'RCON Connection to {rcon.host}:{rcon.port} closed.')
+        except ConnectionResetError:
+            print(f'[{rcon.host}:{rcon.port}] connection closed by client.')
+
+
+    def rcon_session_send(self, rcon, conn):
+        '''Routine to send the server stdout to the client'''
+        try:
+            while conn and self.minecraft.poll() == None:
+                rcon.packet_send(
+                    conn,
+                    Packet(REQUEST_ID.MESSAGE, Packet.TYPE.MULTI, self.minecraft.stdout.readline().encode())
+                )
+        except ConnectionResetError:
+            print(f'[{rcon.host}:{rcon.port}] connection closed by client.')
 
     def start(self):
         self.start_minecraft('java -jar ./minecraft_server.jar nogui')
 
   
     def start_minecraft(self, command):
-
+        '''Start the Minecraft server a subprocess, then start rcon threads'''
         print(command)
 
         self.minecraft = subprocess.Popen(command,
@@ -110,22 +145,8 @@ class MCRCONTLSServer:
 
         threading.Thread(target=self.read_stdout, daemon=True).start()
 
-        #rcon_started = False
-
-        # while self.minecraft.poll() == None:
-        #     out = self.minecraft.stdout.readline().decode()
-
-        #     # if not rcon_started:
-        #     #     match = re.match('Done \([0-9]+\.[0-9]+s\)', out)
-        #     #     print(f'match={match}')
-        #     #     if match:
-        #     #         rcon_started = True
-        #     #         threading.Thread(target=self.start_rcon_server)
-
-        #     if out:
-        #         print(f'[stdout] ' + out, end='')
-
     def start_rcon_server(self):
+            '''Starts the main RCON server thread, as well as the thread that writes to the RCON command queue'''
             threading.Thread(target=self.rcon_server, name="RCONServer").start()
             threading.Thread(target=self.rcon_queueWriter, name='rcon_queueWriter', daemon=True).start()
 
